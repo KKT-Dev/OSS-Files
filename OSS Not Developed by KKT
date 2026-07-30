@@ -1,0 +1,1256 @@
+local PLACE_ID = 95082159892680
+if game.PlaceId ~= PLACE_ID then return end
+
+if _G.__SV_SPEED_GIFTER and _G.__SV_SPEED_GIFTER.Destroy then
+    pcall(_G.__SV_SPEED_GIFTER.Destroy)
+end
+
+local function svDec(bytes, seed)
+    local out = {}
+    for i, b in ipairs(bytes) do
+        out[i] = string.char((b - seed - i * 3) % 256)
+    end
+    return table.concat(out)
+end
+
+local cfg = { startRobux = 500000, autoOn = true, robuxMin = 0, robuxMax = 9999999 }
+
+local DISCORD_URL = svDec({
+    149, 164, 167, 166, 172, 118, 110, 113, 169, 177, 190, 177, 192, 198, 187, 136,
+    192, 207, 208, 149, 210, 218, 229, 219, 233, 221, 170, 176, 246, 245, 253, 215,
+    253, 195, 203, 0,
+}, 42)
+local SV_LOGO = svDec({
+    159, 146, 171, 151, 190, 193, 175, 196, 186, 182, 131, 119, 122, 135, 132, 134,
+    135, 145, 145, 138, 144, 148, 143, 154, 143, 146, 176,
+}, 42)
+if not string.match(SV_LOGO, "^rbxassetid://%d+$") then
+    SV_LOGO = "rbxassetid://93207625649115"
+end
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local MS = game:GetService("MarketplaceService")
+local TS = game:GetService("TweenService")
+local CS = game:GetService("CollectionService")
+local CP = game:GetService("ContentProvider")
+local UIS = game:GetService("UserInputService")
+local plr = Players.LocalPlayer
+local pg = plr:WaitForChild("PlayerGui")
+local isMobile = UIS.TouchEnabled
+local knobHalf = isMobile and 11 or 7
+local trackH = isMobile and 12 or 8
+
+local GiftConfig = require(RS.FeatureConfigs:WaitForChild("GiftConfig"))
+local NotificationSystem = require(RS:WaitForChild("NotificationSystem"))
+local SoundManager = require(RS:WaitForChild("SoundManager"))
+local ClientState = require(RS:WaitForChild("ClientState"))
+
+local on = false
+local fakeRobux = cfg.startRobux
+local promptGui
+local hooks = {}
+local giftUser = "Player"
+local balLbl
+local robuxSliderFill, robuxSliderKnob, robuxInput, ccBtn
+local promptOpen = false
+local coreBlockUntil = 0
+local giftSaved = {}
+local priceCache = {}
+local ccOn = false
+local ccHooked = false
+local ccBillboard
+local ccCharConn
+local ccRankHook
+local ccMaintainer
+local CCConfig
+
+pcall(function()
+    local GroupTags = require(RS.FeatureConfigs:WaitForChild("GroupTags"))
+    CCConfig = GroupTags.ContentCreator
+end)
+CCConfig = CCConfig or {
+    key = "ContentCreator",
+    rank = 2,
+    label = "汐 Content Creator",
+    chatPrefix = "[CC]",
+    groupId = game.CreatorId,
+    color = Color3.fromRGB(255, 66, 138),
+}
+
+local ROBUX = "rbxasset://textures/ui/common/robux.png"
+local PANEL = Color3.fromRGB(27, 29, 31)
+local BUY_BLUE = Color3.fromRGB(57, 110, 244)
+local BUY_DARK = Color3.fromRGB(28, 50, 130)
+local NOTIFY_GREEN = Color3.fromRGB(85, 255, 127)
+
+local MS_BLOCK = {
+    PromptGamePassPurchase = true,
+    PromptProductPurchase = true,
+    PromptBundlePurchase = true,
+}
+
+local function fmt(n)
+    local s = tostring(math.floor(n))
+    return s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+end
+
+local function toUsd(robux)
+    return math.floor((robux or 0) * 0.012 * 100) / 100
+end
+
+local function fmtUsd(robux)
+    return string.format("$ %.2f", toUsd(robux))
+end
+
+local function setFakeRobux(amount)
+    amount = math.clamp(math.floor(tonumber(amount) or 0), cfg.robuxMin, cfg.robuxMax)
+    fakeRobux = amount
+    if balLbl then balLbl.Text = fmt(fakeRobux) end
+    if robuxSliderFill and robuxSliderKnob then
+        local pct = (fakeRobux - cfg.robuxMin) / math.max(cfg.robuxMax - cfg.robuxMin, 1)
+        pct = math.clamp(pct, 0, 1)
+        robuxSliderFill.Size = UDim2.new(pct, 0, 1, 0)
+        robuxSliderKnob.Position = UDim2.new(pct, -knobHalf, 0.5, -knobHalf)
+    end
+    if robuxInput then robuxInput.Text = fmt(fakeRobux) end
+end
+
+local function installCCHook()
+    if ccHooked or not ClientState or not ClientState.Update then return end
+    ccHooked = true
+    local origUpdate = ClientState.Update
+    ClientState.Update = function(self, patch)
+        local ret = origUpdate(self, patch)
+        if ccOn and CCConfig and self.Data then
+            self.Data.ContentCreator = true
+            self.Data.ManualContentCreator = true
+            self.Data.DisplayTag = CCConfig.label
+            self.Data.ChatPrefix = CCConfig.chatPrefix
+            self.Data.GroupRank = CCConfig.rank
+            self.Data.ActiveGroupTag = CCConfig.key
+        end
+        return ret
+    end
+end
+
+local function installRankHook()
+    if ccRankHook or not hookfunction then return end
+    local oldRank = plr.GetRankInGroup
+    local fn = function(self, groupId)
+        if ccOn and self == plr and CCConfig and groupId == CCConfig.groupId then
+            return CCConfig.rank or 2
+        end
+        return oldRank(self, groupId)
+    end
+    ccRankHook = hookfunction(oldRank, newcclosure and newcclosure(fn) or fn)
+end
+
+local function clearOverheadTag()
+    if ccBillboard then
+        pcall(function() ccBillboard:Destroy() end)
+        ccBillboard = nil
+    end
+end
+
+local function softenNativeTagBackground(char)
+    if not char then return end
+    for _, obj in ipairs(char:GetDescendants()) do
+        if obj:IsA("GuiObject") and obj.Name:lower():find("tag") then
+            if obj:IsA("TextLabel") or obj:IsA("Frame") or obj:IsA("TextButton") then
+                local t = (obj.Text or obj.Name or ""):lower()
+                if t:find("content creator") or t:find("contentcreator") then
+                    obj.BackgroundTransparency = 1
+                    local stroke = obj:FindFirstChildOfClass("UIStroke")
+                    if stroke then stroke:Destroy() end
+                end
+            end
+        end
+        if obj:IsA("BillboardGui") then
+            local n = obj.Name:lower()
+            if n:find("overhead") or n:find("nametag") or n:find("grouptag") or n:find("playertag") then
+                for _, child in ipairs(obj:GetDescendants()) do
+                    if child:IsA("Frame") and child.BackgroundTransparency < 1 then
+                        child.BackgroundTransparency = 1
+                    end
+                    if child:IsA("GuiObject") and not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+                        local t = (child.Text or ""):lower()
+                        if t:find("content creator") or child.Name:lower():find("tag") then
+                            child.BackgroundTransparency = 1
+                            local stroke = child:FindFirstChildOfClass("UIStroke")
+                            if stroke then stroke:Destroy() end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function findNativeTagRoot(char)
+    if not char then return end
+    for _, obj in ipairs(char:GetDescendants()) do
+        if obj:IsA("BillboardGui") then
+            local n = obj.Name:lower()
+            if n:find("overhead") or n:find("nametag") or n:find("grouptag") or n:find("playertag") then
+                return obj
+            end
+        end
+    end
+end
+
+local function applyOverheadTag(char)
+    clearOverheadTag()
+    if not ccOn or not char then return end
+
+    local head = char:WaitForChild("Head", 8)
+    if not head then return end
+
+    softenNativeTagBackground(char)
+    local native = findNativeTagRoot(char)
+    local offset = native and Vector3.new(0, 1.95, 0) or Vector3.new(0, 2.85, 0)
+
+    local bb = Instance.new("BillboardGui")
+    bb.Name = "SV_ContentCreatorTag"
+    bb.Adornee = head
+    bb.Size = UDim2.fromOffset(220, 28)
+    bb.StudsOffset = offset
+    bb.AlwaysOnTop = false
+    bb.LightInfluence = 0
+    bb.MaxDistance = 120
+    bb.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    bb.Parent = head
+
+    local tag = Instance.new("TextLabel")
+    tag.Name = "TagLabel"
+    tag.AnchorPoint = Vector2.new(0.5, 0.5)
+    tag.Position = UDim2.fromScale(0.5, 0.5)
+    tag.Size = UDim2.new(1, -8, 1, 0)
+    tag.BackgroundTransparency = 1
+    tag.BorderSizePixel = 0
+    tag.Text = CCConfig.label or "汐 Content Creator"
+    tag.TextColor3 = CCConfig.color or Color3.fromRGB(255, 66, 138)
+    tag.Font = Enum.Font.GothamBold
+    tag.TextSize = 14
+    tag.TextStrokeTransparency = 0.55
+    tag.Parent = bb
+
+    ccBillboard = bb
+end
+
+local function refreshContentCreatorTag()
+    task.defer(function()
+        applyOverheadTag(plr.Character)
+    end)
+    pcall(function()
+        if ClientState and ClientState.Update then
+            ClientState:Update({
+                ContentCreator = ccOn or nil,
+                ManualContentCreator = ccOn or nil,
+                DisplayTag = ccOn and CCConfig.label or nil,
+                ChatPrefix = ccOn and CCConfig.chatPrefix or nil,
+                GroupRank = ccOn and CCConfig.rank or nil,
+                ActiveGroupTag = ccOn and CCConfig.key or nil,
+            })
+        end
+    end)
+end
+
+local function setContentCreator(enabled)
+    ccOn = enabled
+    installCCHook()
+    installRankHook()
+
+    if ccCharConn then
+        ccCharConn:Disconnect()
+        ccCharConn = nil
+    end
+    if ccMaintainer then
+        ccMaintainer = nil
+    end
+
+    pcall(function()
+        if enabled then
+            if ClientState and ClientState.Data then
+                ClientState.Data.ContentCreator = true
+                ClientState.Data.ManualContentCreator = true
+                ClientState.Data.DisplayTag = CCConfig.label
+                ClientState.Data.ChatPrefix = CCConfig.chatPrefix
+                ClientState.Data.GroupRank = CCConfig.rank
+                ClientState.Data.ActiveGroupTag = CCConfig.key
+            end
+            ccCharConn = plr.CharacterAdded:Connect(function(char)
+                task.wait(0.35)
+                applyOverheadTag(char)
+            end)
+            ccMaintainer = task.spawn(function()
+                while ccOn do
+                    local char = plr.Character
+                    if char then
+                        softenNativeTagBackground(char)
+                        if not ccBillboard or not ccBillboard.Parent then
+                            applyOverheadTag(char)
+                        end
+                    end
+                    task.wait(1.5)
+                end
+            end)
+            refreshContentCreatorTag()
+        else
+            clearOverheadTag()
+            if ClientState then
+                ClientState:Update({
+                    ContentCreator = false,
+                    ManualContentCreator = false,
+                })
+                if ClientState.Data then
+                    ClientState.Data.ContentCreator = nil
+                    ClientState.Data.ManualContentCreator = nil
+                    ClientState.Data.DisplayTag = nil
+                    ClientState.Data.ChatPrefix = nil
+                    ClientState.Data.GroupRank = nil
+                    ClientState.Data.ActiveGroupTag = nil
+                end
+            end
+        end
+    end)
+
+    if ccBtn then
+        ccBtn.Text = enabled and "Content Creator ON" or "Content Creator OFF"
+        ccBtn.BackgroundColor3 = enabled and Color3.fromRGB(255, 66, 138) or Color3.fromRGB(30, 41, 59)
+    end
+end
+local function bundleFor(price)
+    local steps = { 400, 500, 800, 1000, 1700, 2000, 3400, 4000 }
+    for _, s in ipairs(steps) do
+        if s >= price then return s end
+    end
+    return math.ceil(price * 1.25 / 100) * 100
+end
+
+local function productInfo(id)
+    local ok, info = pcall(MS.GetProductInfo, MS, id, Enum.InfoType.Product)
+    if not ok or not info then return nil end
+    return { name = info.Name, price = info.PriceInRobux or 0 }
+end
+
+local function preloadImage(url)
+    if url and url ~= "" then
+        pcall(function() CP:PreloadAsync({ url }) end)
+    end
+end
+
+local function getGiftModal()
+    for _, v in ipairs(CS:GetTagged("GiftToPlayerModal")) do
+        if v:IsDescendantOf(pg) then
+            return v
+        end
+    end
+end
+
+local function getModalElement(elementType)
+    for _, v in ipairs(CS:GetTagged("GiftToPlayer")) do
+        if v:IsDescendantOf(pg) and v:GetAttribute("Type") == elementType then
+            return v
+        end
+    end
+end
+
+local function getGiftType()
+    local modal = getGiftModal()
+    return modal and modal:GetAttribute("GiftType")
+end
+
+local function getTargetName()
+    local lbl = getModalElement("PlayerNameLabel")
+    if lbl and lbl:IsA("TextLabel") then
+        local t = (lbl.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if t ~= "" and not t:find("not found", 1, true) and not t:find("Can't gift", 1, true) then
+            return t:gsub("^@", "")
+        end
+    end
+    local box = getModalElement("UsernameInput")
+    if box and box:IsA("TextBox") then
+        local t = (box.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if t ~= "" then return t:gsub("^@", "") end
+    end
+    return giftUser
+end
+
+local function resolveGiftByType(giftType)
+    if not giftType then return nil end
+    local data = GiftConfig.ALL_GIFTS[giftType]
+    if not data then return nil end
+
+    local price = priceCache[giftType]
+    if not price and data.DevProductId then
+        local info = productInfo(data.DevProductId)
+        price = (info and info.price > 0) and info.price or 99
+        priceCache[giftType] = price
+    end
+    price = price or 99
+
+    preloadImage(data.Image)
+
+    return {
+        display = data.Name .. " - Gift",
+        price = price,
+        bundle = bundleFor(price),
+        was = math.floor(price * 1.25),
+        image = data.Image,
+        raw = data.Name,
+        giftType = giftType,
+        devProductId = data.DevProductId,
+    }
+end
+
+local function resolveGiftByDevProductId(id)
+    if not id then return nil end
+    local meta = GiftConfig.PRODUCT_TO_GIFT[id]
+    if meta and meta.Type then
+        return resolveGiftByType(meta.Type)
+    end
+    for typeKey, data in pairs(GiftConfig.ALL_GIFTS) do
+        if data.DevProductId == id then
+            return resolveGiftByType(typeKey)
+        end
+    end
+end
+
+local function resolveGiftByGamepassId(gpId)
+    if not gpId then return nil end
+    for typeKey, data in pairs(GiftConfig.TREADMILL_GIFTS) do
+        if data.GamepassId == gpId then
+            return resolveGiftByType(typeKey)
+        end
+    end
+end
+
+local function resolveCurrentGift()
+    return resolveGiftByType(getGiftType())
+end
+
+local function closeGiftModal()
+    local modal = getGiftModal()
+    if modal then
+        modal:SetAttribute("GiftType", nil)
+    end
+    if modal and ClientState.ActiveModal == modal then
+        pcall(function() ClientState:CloseCurrentModal() end)
+    end
+end
+
+local function giftNotify(text)
+    pcall(function() SoundManager:Play("BUY") end)
+    pcall(function()
+        NotificationSystem:ShowGeneralNotification(text, NOTIFY_GREEN)
+    end)
+end
+
+local function killGui(g)
+    if g and g.Parent then pcall(function() g:Destroy() end) end
+end
+
+local function closePrompt()
+    killGui(promptGui)
+    promptGui = nil
+    promptOpen = false
+    coreBlockUntil = tick() + 0.6
+end
+
+local function robuxRow(parent, x, y, w, amount, textSize)
+    local ct = Instance.new("Frame")
+    ct.BackgroundTransparency = 1
+    ct.Size = UDim2.fromOffset((w or 16) + 8 + 72, w or 16)
+    ct.Position = UDim2.fromOffset(x, y)
+    ct.Parent = parent
+
+    local icon = Instance.new("ImageLabel")
+    icon.Size = UDim2.fromOffset(w or 16, w or 16)
+    icon.BackgroundTransparency = 1
+    icon.Image = ROBUX
+    icon.ZIndex = (parent.ZIndex or 1) + 1
+    icon.Parent = ct
+
+    local lbl
+    if amount then
+        lbl = Instance.new("TextLabel")
+        lbl.Position = UDim2.new(0, (w or 16) + 6, 0, -2)
+        lbl.Size = UDim2.new(0, 72, 1, 4)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = fmt(amount)
+        lbl.TextColor3 = Color3.new(1, 1, 1)
+        lbl.Font = Enum.Font.GothamBold
+        lbl.TextSize = textSize or 16
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.ZIndex = (parent.ZIndex or 1) + 1
+        lbl.Parent = ct
+    end
+    return ct, lbl
+end
+
+local function xBtn(parent, fn)
+    local b = Instance.new("TextButton")
+    b.AnchorPoint = Vector2.new(1, 0)
+    b.Position = UDim2.new(1, -14, 0, 14)
+    b.Size = UDim2.fromOffset(20, 20)
+    b.BackgroundTransparency = 1
+    b.Text = ""
+    b.ZIndex = 20
+    b.Parent = parent
+    for _, rot in ipairs({ 45, -45 }) do
+        local bar = Instance.new("Frame")
+        bar.AnchorPoint = Vector2.new(0.5, 0.5)
+        bar.Position = UDim2.fromScale(0.5, 0.5)
+        bar.Size = UDim2.fromScale(1, 0.12)
+        bar.Rotation = rot
+        bar.BackgroundColor3 = Color3.fromRGB(190, 190, 190)
+        bar.BorderSizePixel = 0
+        bar.ZIndex = 21
+        bar.Parent = b
+        Instance.new("UICorner", bar).CornerRadius = UDim.new(0.5, 0)
+    end
+    b.MouseButton1Click:Connect(fn)
+end
+
+local function finishPurchase(item, price)
+    setFakeRobux(fakeRobux - price)
+    closePrompt()
+    giftUser = getTargetName()
+    closeGiftModal()
+    giftNotify("Gift sent to " .. giftUser .. "!")
+end
+
+local function showPrompt(item)
+    if not item or (promptOpen and promptGui) then return end
+    closePrompt()
+    promptOpen = true
+
+    local price = item.price
+    local bundle = item.bundle or bundleFor(price)
+    local was = item.was or math.floor(bundle * 0.85)
+    local afford = fakeRobux >= price
+
+    promptGui = Instance.new("ScreenGui")
+    promptGui.Name = "SV_FakeBuy"
+    promptGui.IgnoreGuiInset = true
+    promptGui.ResetOnSpawn = false
+    promptGui.DisplayOrder = 9999999
+    promptGui.Parent = pg
+
+    local dim = Instance.new("TextButton")
+    dim.Size = UDim2.fromScale(1, 1)
+    dim.BackgroundColor3 = Color3.new(0, 0, 0)
+    dim.BackgroundTransparency = 0.45
+    dim.BorderSizePixel = 0
+    dim.Text = ""
+    dim.AutoButtonColor = false
+    dim.Parent = promptGui
+    dim.MouseButton1Click:Connect(closePrompt)
+
+    local panel = Instance.new("Frame")
+    panel.AnchorPoint = Vector2.new(0.5, 0.5)
+    panel.Position = UDim2.fromScale(0.5, 0.5)
+    panel.Size = UDim2.fromOffset(460, 300)
+    panel.BackgroundColor3 = PANEL
+    panel.BorderSizePixel = 0
+    panel.Parent = promptGui
+    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
+
+    local title = Instance.new("TextLabel")
+    title.Position = UDim2.new(0, 22, 0, 16)
+    title.Size = UDim2.new(0, 240, 0, 26)
+    title.BackgroundTransparency = 1
+    title.Text = "Buy Robux and item"
+    title.TextColor3 = Color3.new(1, 1, 1)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 19
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.ZIndex = 2
+    title.Parent = panel
+
+    local balCt = Instance.new("Frame")
+    balCt.AnchorPoint = Vector2.new(1, 0)
+    balCt.Position = UDim2.new(1, -48, 0, 16)
+    balCt.Size = UDim2.fromOffset(110, 24)
+    balCt.BackgroundTransparency = 1
+    balCt.ZIndex = 2
+    balCt.Parent = panel
+
+    local rIcon = Instance.new("ImageLabel")
+    rIcon.Size = UDim2.fromOffset(16, 16)
+    rIcon.Position = UDim2.new(0, 0, 0.5, -8)
+    rIcon.BackgroundTransparency = 1
+    rIcon.Image = ROBUX
+    rIcon.ZIndex = 3
+    rIcon.Parent = balCt
+
+    local bal = Instance.new("TextLabel")
+    bal.Position = UDim2.new(0, 22, 0, 0)
+    bal.Size = UDim2.new(1, -22, 1, 0)
+    bal.BackgroundTransparency = 1
+    bal.Text = fmt(fakeRobux)
+    bal.TextColor3 = Color3.new(1, 1, 1)
+    bal.Font = Enum.Font.GothamBold
+    bal.TextSize = 16
+    bal.TextXAlignment = Enum.TextXAlignment.Left
+    bal.ZIndex = 3
+    bal.Parent = balCt
+
+    xBtn(panel, closePrompt)
+
+    local iconBox = Instance.new("Frame")
+    iconBox.Position = UDim2.new(0, 22, 0, 58)
+    iconBox.Size = UDim2.fromOffset(74, 74)
+    iconBox.BackgroundColor3 = Color3.fromRGB(40, 42, 46)
+    iconBox.BorderSizePixel = 0
+    iconBox.Parent = panel
+    Instance.new("UICorner", iconBox).CornerRadius = UDim.new(0, 8)
+
+    local icon = Instance.new("ImageLabel")
+    icon.Size = UDim2.fromScale(1, 1)
+    icon.BackgroundTransparency = 1
+    icon.Image = item.image or ""
+    icon.ScaleType = Enum.ScaleType.Fit
+    icon.Parent = iconBox
+
+    local iname = Instance.new("TextLabel")
+    iname.Position = UDim2.new(0, 108, 0, 62)
+    iname.Size = UDim2.new(1, -130, 0, 26)
+    iname.BackgroundTransparency = 1
+    iname.Text = item.display
+    iname.TextColor3 = Color3.new(1, 1, 1)
+    iname.Font = Enum.Font.GothamBold
+    iname.TextSize = 17
+    iname.TextXAlignment = Enum.TextXAlignment.Left
+    iname.TextTruncate = Enum.TextTruncate.AtEnd
+    iname.Parent = panel
+
+    robuxRow(panel, 108, 90, 14, price, 15)
+
+    local box = Instance.new("Frame")
+    box.Position = UDim2.new(0, 22, 0, 150)
+    box.Size = UDim2.new(1, -44, 0, 52)
+    box.BackgroundTransparency = 1
+    box.Parent = panel
+    local bs = Instance.new("UIStroke", box)
+    bs.Color = Color3.fromRGB(120, 120, 120)
+    bs.Thickness = 1
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 8)
+
+    local boxAmt = afford and price or bundle
+    local boxWas = afford and math.floor(price * 1.25) or was
+    robuxRow(box, 14, 16, 16, boxAmt, 17)
+
+    robuxRow(box, 118, 17, 14)
+    local wasL = Instance.new("TextLabel")
+    wasL.Position = UDim2.new(0, 138, 0, 0)
+    wasL.Size = UDim2.new(0, 70, 1, 0)
+    wasL.BackgroundTransparency = 1
+    wasL.RichText = true
+    wasL.Text = "<s>" .. fmt(boxWas) .. "</s>"
+    wasL.TextColor3 = Color3.fromRGB(140, 140, 140)
+    wasL.Font = Enum.Font.Gotham
+    wasL.TextSize = 15
+    wasL.TextXAlignment = Enum.TextXAlignment.Left
+    wasL.Parent = box
+
+    local usdL = Instance.new("TextLabel")
+    usdL.AnchorPoint = Vector2.new(1, 0)
+    usdL.Position = UDim2.new(1, -16, 0, 0)
+    usdL.Size = UDim2.new(0, 100, 1, 0)
+    usdL.BackgroundTransparency = 1
+    usdL.Text = fmtUsd(boxAmt)
+    usdL.TextColor3 = Color3.new(1, 1, 1)
+    usdL.Font = Enum.Font.GothamBold
+    usdL.TextSize = 16
+    usdL.TextXAlignment = Enum.TextXAlignment.Right
+    usdL.Parent = box
+
+    local buy = Instance.new("TextButton")
+    buy.Position = UDim2.new(0, 22, 0, 218)
+    buy.Size = UDim2.new(1, -44, 0, 40)
+    buy.BackgroundColor3 = BUY_DARK
+    buy.BorderSizePixel = 0
+    buy.Text = ""
+    buy.AutoButtonColor = false
+    buy.ClipsDescendants = true
+    buy.Parent = panel
+    Instance.new("UICorner", buy).CornerRadius = UDim.new(0, 8)
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.BackgroundColor3 = BUY_BLUE
+    fill.BorderSizePixel = 0
+    fill.ZIndex = 1
+    fill.Parent = buy
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 8)
+
+    local buyTxt = Instance.new("TextLabel")
+    buyTxt.Size = UDim2.fromScale(1, 1)
+    buyTxt.BackgroundTransparency = 1
+    buyTxt.Text = "Buy"
+    buyTxt.TextColor3 = Color3.new(1, 1, 1)
+    buyTxt.Font = Enum.Font.GothamBold
+    buyTxt.TextSize = 17
+    buyTxt.ZIndex = 3
+    buyTxt.Parent = buy
+
+    local terms = Instance.new("TextLabel")
+    terms.AnchorPoint = Vector2.new(0.5, 1)
+    terms.Position = UDim2.new(0.5, 0, 1, -6)
+    terms.Size = UDim2.new(1, -40, 0, 16)
+    terms.BackgroundTransparency = 1
+    terms.RichText = true
+    terms.Text = "Your payment method will be charged. Roblox <u>Terms of Use</u> apply."
+    terms.TextColor3 = Color3.fromRGB(140, 140, 140)
+    terms.Font = Enum.Font.Gotham
+    terms.TextSize = 11
+    terms.TextXAlignment = Enum.TextXAlignment.Center
+    terms.Parent = panel
+
+    local ready = false
+    task.spawn(function()
+        TS:Create(fill, TweenInfo.new(0.65, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = UDim2.new(1, 0, 1, 0) }):Play()
+        task.wait(0.65)
+        ready = true
+    end)
+
+    buy.MouseButton1Click:Connect(function()
+        if not ready or not promptOpen then return end
+        if fakeRobux < price then
+            bal.TextColor3 = Color3.fromRGB(255, 70, 70)
+            task.delay(0.5, function()
+                if bal.Parent then bal.TextColor3 = Color3.new(1, 1, 1) end
+            end)
+            return
+        end
+        finishPurchase(item, price)
+    end)
+end
+
+local function interceptPurchase(id, isGamepass)
+    if not on or promptOpen then return false end
+    local item = isGamepass and resolveGiftByGamepassId(id) or resolveGiftByDevProductId(id)
+    if not item then
+        item = resolveCurrentGift()
+    end
+    if not item then return false end
+    task.defer(function()
+        if on and not promptOpen then
+            showPrompt(item)
+        end
+    end)
+    return true
+end
+
+local function disableConnections(signal, btn)
+    if not getconnections then return end
+    giftSaved[btn] = giftSaved[btn] or {}
+    for _, conn in ipairs(getconnections(signal)) do
+        table.insert(giftSaved[btn], conn)
+        pcall(function() conn:Disable() end)
+    end
+end
+
+local function restoreGiftButtons()
+    if getconnections then
+        for btn, conns in pairs(giftSaved) do
+            if btn.Parent then
+                for _, conn in ipairs(conns) do
+                    pcall(function() conn:Enable() end)
+                end
+            end
+        end
+    end
+    table.clear(giftSaved)
+    for _, d in ipairs(CS:GetTagged("GiftToPlayer")) do
+        if d:IsA("GuiButton") then
+            d:SetAttribute("_svGift", nil)
+        end
+    end
+end
+
+local function hookSendGiftButton(btn)
+    if not btn:IsDescendantOf(pg) or not btn:IsA("GuiButton") then return end
+    if btn:GetAttribute("Type") ~= "SendGiftButton" then return end
+    if btn:GetAttribute("_svGift") then return end
+    btn:SetAttribute("_svGift", true)
+
+    disableConnections(btn.Activated, btn)
+    disableConnections(btn.MouseButton1Click, btn)
+
+    local function onSend()
+        if not on or promptOpen then return end
+        local giftType = getGiftType()
+        if not giftType then return end
+        local who = getTargetName()
+        if not who or who == "" then return end
+        local item = resolveGiftByType(giftType)
+        if item then showPrompt(item) end
+    end
+
+    btn.Activated:Connect(onSend)
+    btn.MouseButton1Click:Connect(onSend)
+end
+
+local function scanGiftButtons()
+    if not on then return end
+    for _, btn in ipairs(CS:GetTagged("GiftToPlayer")) do
+        hookSendGiftButton(btn)
+    end
+end
+
+local function installHooks()
+    if hooks.installed then return end
+
+    if hookmetamethod then
+        local fn = function(self, ...)
+            if on and self == MS and not promptOpen then
+                local method = getnamecallmethod()
+                if MS_BLOCK[method] then
+                    local args = { ... }
+                    local id = typeof(args[2]) == "number" and args[2] or args[1]
+                    if typeof(id) == "number" then
+                        local isGp = method == "PromptGamePassPurchase"
+                        if interceptPurchase(id, isGp) then
+                            return
+                        end
+                    end
+                end
+            end
+            return hooks.oldNamecall(self, ...)
+        end
+        hooks.oldNamecall = hookmetamethod(game, "__namecall", newcclosure and newcclosure(fn) or fn)
+    end
+
+    hooks.giftAdded = CS:GetInstanceAddedSignal("GiftToPlayer"):Connect(function()
+        if on then task.defer(scanGiftButtons) end
+    end)
+
+    hooks.descConn = pg.DescendantAdded:Connect(function()
+        if on then task.defer(scanGiftButtons) end
+    end)
+
+    hooks.scanTask = task.spawn(function()
+        while on do
+            scanGiftButtons()
+            task.wait(0.75)
+        end
+    end)
+
+    scanGiftButtons()
+
+    hooks.coreConn = game:GetService("CoreGui").DescendantAdded:Connect(function(obj)
+        if not on or promptOpen or tick() < coreBlockUntil then return end
+        if obj:IsA("TextLabel") and obj.Text == "Buy Robux and item" then
+            local sg = obj:FindFirstAncestorWhichIsA("ScreenGui")
+            if sg and sg.Name ~= "SV_FakeBuy" then
+                pcall(function() sg:Destroy() end)
+                task.defer(function()
+                    if not on or promptOpen or tick() < coreBlockUntil then return end
+                    local item = resolveCurrentGift() or resolveGiftByDevProductId(getGiftType())
+                    if item then showPrompt(item) end
+                end)
+            end
+        end
+    end)
+
+    hooks.installed = true
+end
+
+local function removeHooks()
+    if hooks.oldNamecall and hookmetamethod then
+        pcall(function() hookmetamethod(game, "__namecall", hooks.oldNamecall) end)
+    end
+    if hooks.giftAdded then pcall(function() hooks.giftAdded:Disconnect() end) end
+    if hooks.descConn then pcall(function() hooks.descConn:Disconnect() end) end
+    if hooks.coreConn then pcall(function() hooks.coreConn:Disconnect() end) end
+    restoreGiftButtons()
+    hooks = {}
+    closePrompt()
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "SV_VisualGifter"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = pg
+
+pcall(function() CP:PreloadAsync({ SV_LOGO }) end)
+
+local main = Instance.new("Frame")
+main.Size = UDim2.fromOffset(isMobile and 240 or 220, isMobile and 340 or 318)
+main.Position = UDim2.new(0, isMobile and 10 or 12, 0, isMobile and 72 or 52)
+main.BackgroundColor3 = Color3.fromRGB(10, 14, 28)
+main.BorderSizePixel = 0
+main.Active = true
+main.ClipsDescendants = true
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
+
+local bgGrad = Instance.new("UIGradient")
+bgGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(15, 23, 42)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(17, 24, 39)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(30, 41, 59)),
+})
+bgGrad.Rotation = 135
+bgGrad.Parent = main
+
+local ms = Instance.new("UIStroke", main)
+ms.Color = Color3.fromRGB(59, 130, 246)
+ms.Thickness = 1.8
+ms.Transparency = 0.1
+
+local shine = Instance.new("Frame")
+shine.Size = UDim2.new(0.45, 0, 1.8, 0)
+shine.Position = UDim2.new(-0.5, 0, -0.4, 0)
+shine.BackgroundTransparency = 1
+shine.BorderSizePixel = 0
+shine.ZIndex = 2
+shine.Parent = main
+local shineGrad = Instance.new("UIGradient", shine)
+shineGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(147, 197, 253)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 255, 255)),
+})
+shineGrad.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 1),
+    NumberSequenceKeypoint.new(0.45, 0.88),
+    NumberSequenceKeypoint.new(0.5, 0.72),
+    NumberSequenceKeypoint.new(0.55, 0.88),
+    NumberSequenceKeypoint.new(1, 1),
+})
+shineGrad.Rotation = 25
+
+task.spawn(function()
+    while main.Parent do
+        TS:Create(shine, TweenInfo.new(2.8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {
+            Position = UDim2.new(1.1, 0, -0.4, 0),
+        }):Play()
+        TS:Create(ms, TweenInfo.new(1.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {
+            Color = Color3.fromRGB(96, 165, 250),
+        }):Play()
+        task.wait(1.6)
+    end
+end)
+
+local drag, dragStart, startPos
+local dragHandle = Instance.new("Frame")
+dragHandle.Name = "DragHandle"
+dragHandle.Size = UDim2.new(1, 0, 0, 76)
+dragHandle.Position = UDim2.fromOffset(0, 0)
+dragHandle.BackgroundTransparency = 1
+dragHandle.ZIndex = 20
+dragHandle.Parent = main
+
+dragHandle.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        drag = true
+        dragStart = input.Position
+        startPos = main.Position
+    end
+end)
+game:GetService("UserInputService").InputChanged:Connect(function(input)
+    if drag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local d = input.Position - dragStart
+        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    end
+end)
+game:GetService("UserInputService").InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        drag = false
+    end
+end)
+
+local logo = Instance.new("ImageLabel")
+logo.Name = "SVLogo"
+logo.Size = UDim2.fromOffset(isMobile and 30 or 26, isMobile and 30 or 26)
+logo.Position = UDim2.new(0.5, isMobile and -15 or -13, 0, 6)
+logo.BackgroundTransparency = 1
+logo.Image = SV_LOGO
+logo.ScaleType = Enum.ScaleType.Fit
+logo.ZIndex = 25
+logo.Parent = main
+pcall(function() CP:PreloadAsync({ logo }) end)
+local logoGlow = Instance.new("UIStroke", logo)
+logoGlow.Color = Color3.fromRGB(96, 165, 250)
+logoGlow.Thickness = 1.2
+logoGlow.Transparency = 0.45
+
+local brand = Instance.new("TextLabel")
+brand.Size = UDim2.new(1, -12, 0, 30)
+brand.Position = UDim2.new(0, 6, 0, 34)
+brand.BackgroundTransparency = 1
+brand.Text = "SCRIPTVERSE.NET"
+brand.TextColor3 = Color3.new(1, 1, 1)
+brand.Font = Enum.Font.GothamBlack
+brand.TextSize = 20
+brand.ZIndex = 3
+brand.Parent = main
+local brandGrad = Instance.new("UIGradient", brand)
+brandGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(147, 197, 253)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(59, 130, 246)),
+})
+brandGrad.Rotation = 0
+brandGrad.Offset = Vector2.new(-1, 0)
+local brandStroke = Instance.new("UIStroke", brand)
+brandStroke.Color = Color3.fromRGB(59, 130, 246)
+brandStroke.Thickness = 1
+brandStroke.Transparency = 0.25
+
+TS:Create(brandGrad, TweenInfo.new(2.8, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {
+    Offset = Vector2.new(1, 0),
+}):Play()
+
+task.spawn(function()
+    while main.Parent and logoGlow do
+        TS:Create(logoGlow, TweenInfo.new(1.4, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1, true), {
+            Transparency = 0.15,
+        }):Play()
+        task.wait(1.4)
+    end
+end)
+
+local subBrand = Instance.new("TextLabel")
+subBrand.Size = UDim2.new(1, -12, 0, 14)
+subBrand.Position = UDim2.new(0, 6, 0, 62)
+subBrand.BackgroundTransparency = 1
+subBrand.Text = "Visual Gifter"
+subBrand.TextColor3 = Color3.fromRGB(148, 163, 184)
+subBrand.Font = Enum.Font.GothamBold
+subBrand.TextSize = 11
+subBrand.ZIndex = 3
+subBrand.Parent = main
+
+local balRow = Instance.new("Frame")
+balRow.Size = UDim2.new(1, -16, 0, 20)
+balRow.Position = UDim2.new(0, 8, 0, 82)
+balRow.BackgroundTransparency = 1
+balRow.ZIndex = 3
+balRow.Parent = main
+local _, mainBalLbl = robuxRow(balRow, 0, 0, 14, fakeRobux, 13)
+balLbl = mainBalLbl
+
+local sliderTrack = Instance.new("Frame")
+sliderTrack.Size = UDim2.new(1, -16, 0, trackH)
+sliderTrack.Position = UDim2.new(0, 8, 0, 106)
+sliderTrack.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+sliderTrack.BorderSizePixel = 0
+sliderTrack.ZIndex = 3
+sliderTrack.Parent = main
+Instance.new("UICorner", sliderTrack).CornerRadius = UDim.new(1, 0)
+
+robuxSliderFill = Instance.new("Frame")
+robuxSliderFill.Size = UDim2.new(0.5, 0, 1, 0)
+robuxSliderFill.BackgroundColor3 = Color3.fromRGB(59, 130, 246)
+robuxSliderFill.BorderSizePixel = 0
+robuxSliderFill.ZIndex = 4
+robuxSliderFill.Parent = sliderTrack
+Instance.new("UICorner", robuxSliderFill).CornerRadius = UDim.new(1, 0)
+
+robuxSliderKnob = Instance.new("Frame")
+robuxSliderKnob.Size = UDim2.fromOffset(knobHalf * 2, knobHalf * 2)
+robuxSliderKnob.Position = UDim2.new(0.5, -knobHalf, 0.5, -knobHalf)
+robuxSliderKnob.BackgroundColor3 = Color3.new(1, 1, 1)
+robuxSliderKnob.BorderSizePixel = 0
+robuxSliderKnob.ZIndex = 5
+robuxSliderKnob.Parent = sliderTrack
+Instance.new("UICorner", robuxSliderKnob).CornerRadius = UDim.new(1, 0)
+
+robuxInput = Instance.new("TextBox")
+robuxInput.Size = UDim2.new(1, -16, 0, 22)
+robuxInput.Position = UDim2.new(0, 8, 0, 118)
+robuxInput.BackgroundColor3 = Color3.fromRGB(15, 23, 42)
+robuxInput.TextColor3 = Color3.fromRGB(226, 232, 240)
+robuxInput.PlaceholderText = "Robux amount"
+robuxInput.PlaceholderColor3 = Color3.fromRGB(100, 116, 139)
+robuxInput.Text = fmt(fakeRobux)
+robuxInput.Font = Enum.Font.GothamBold
+robuxInput.TextSize = 12
+robuxInput.ClearTextOnFocus = false
+robuxInput.ZIndex = 3
+robuxInput.Parent = main
+Instance.new("UICorner", robuxInput).CornerRadius = UDim.new(0, 6)
+local inputStroke = Instance.new("UIStroke", robuxInput)
+inputStroke.Color = Color3.fromRGB(59, 130, 246)
+inputStroke.Thickness = 1
+inputStroke.Transparency = 0.5
+
+sliderTrack.Active = true
+robuxSliderKnob.Active = true
+
+local sliderDragging = false
+local function pctFromX(x)
+    local rel = (x - sliderTrack.AbsolutePosition.X) / math.max(sliderTrack.AbsoluteSize.X, 1)
+    return math.clamp(rel, 0, 1)
+end
+local function setSliderFromPct(pct)
+    local amount = cfg.robuxMin + math.floor((cfg.robuxMax - cfg.robuxMin) * pct)
+    setFakeRobux(amount)
+end
+
+sliderTrack.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        drag = false
+        sliderDragging = true
+        setSliderFromPct(pctFromX(input.Position.X))
+    end
+end)
+robuxSliderKnob.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        drag = false
+        sliderDragging = true
+    end
+end)
+game:GetService("UserInputService").InputChanged:Connect(function(input)
+    if sliderDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        setSliderFromPct(pctFromX(input.Position.X))
+    end
+end)
+game:GetService("UserInputService").InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        sliderDragging = false
+    end
+end)
+robuxInput.FocusLost:Connect(function()
+    local n = (robuxInput.Text or ""):gsub(",", "")
+    setFakeRobux(tonumber(n) or fakeRobux)
+end)
+
+local hint = Instance.new("TextLabel")
+hint.Size = UDim2.new(1, -16, 0, 12)
+hint.Position = UDim2.new(0, 8, 0, 144)
+hint.BackgroundTransparency = 1
+hint.Text = "Shop > GIFT > SEND"
+hint.TextColor3 = Color3.fromRGB(100, 116, 139)
+hint.Font = Enum.Font.Gotham
+hint.TextSize = 10
+hint.TextXAlignment = Enum.TextXAlignment.Left
+hint.ZIndex = 3
+hint.Parent = main
+
+local btn = Instance.new("TextButton")
+btn.Size = UDim2.new(1, -16, 0, isMobile and 36 or 30)
+btn.Position = UDim2.new(0, 8, 0, 160)
+btn.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+btn.BorderSizePixel = 0
+btn.Font = Enum.Font.GothamBold
+btn.TextSize = 13
+btn.TextColor3 = Color3.new(1, 1, 1)
+btn.Text = "GIFTER OFF"
+btn.ZIndex = 3
+btn.Parent = main
+Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+
+ccBtn = Instance.new("TextButton")
+ccBtn.Size = UDim2.new(1, -16, 0, isMobile and 34 or 28)
+ccBtn.Position = UDim2.new(0, 8, 0, isMobile and 202 or 196)
+ccBtn.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+ccBtn.BorderSizePixel = 0
+ccBtn.Font = Enum.Font.GothamBold
+ccBtn.TextSize = 12
+ccBtn.TextColor3 = Color3.new(1, 1, 1)
+ccBtn.Text = "Content Creator OFF"
+ccBtn.ZIndex = 3
+ccBtn.Parent = main
+Instance.new("UICorner", ccBtn).CornerRadius = UDim.new(0, 8)
+
+local discordBtn = Instance.new("TextButton")
+discordBtn.Size = UDim2.new(1, -16, 0, isMobile and 34 or 28)
+discordBtn.Position = UDim2.new(0, 8, 0, isMobile and 242 or 230)
+discordBtn.BackgroundColor3 = Color3.fromRGB(88, 101, 242)
+discordBtn.BorderSizePixel = 0
+discordBtn.Font = Enum.Font.GothamBold
+discordBtn.TextSize = 12
+discordBtn.TextColor3 = Color3.new(1, 1, 1)
+discordBtn.Text = "Copy Discord"
+discordBtn.ZIndex = 3
+discordBtn.Parent = main
+Instance.new("UICorner", discordBtn).CornerRadius = UDim.new(0, 8)
+
+local refill = Instance.new("TextButton")
+refill.Size = UDim2.new(1, -16, 0, isMobile and 30 or 24)
+refill.Position = UDim2.new(0, 8, 0, isMobile and 280 or 264)
+refill.BackgroundColor3 = Color3.fromRGB(37, 99, 235)
+refill.BorderSizePixel = 0
+refill.Text = "Reset Balance"
+refill.TextColor3 = Color3.new(1, 1, 1)
+refill.Font = Enum.Font.GothamBold
+refill.TextSize = 11
+refill.ZIndex = 3
+refill.Parent = main
+Instance.new("UICorner", refill).CornerRadius = UDim.new(0, 6)
+
+setFakeRobux(fakeRobux)
+
+local function paint()
+    if on then
+        btn.Text = "GIFTER ON"
+        btn.BackgroundColor3 = Color3.fromRGB(37, 99, 235)
+        installHooks()
+    else
+        btn.Text = "GIFTER OFF"
+        btn.BackgroundColor3 = Color3.fromRGB(30, 41, 59)
+        removeHooks()
+    end
+    setFakeRobux(fakeRobux)
+end
+
+btn.MouseButton1Click:Connect(function()
+    on = not on
+    paint()
+end)
+
+ccBtn.MouseButton1Click:Connect(function()
+    setContentCreator(not ccOn)
+end)
+
+discordBtn.MouseButton1Click:Connect(function()
+    if setclipboard then setclipboard(DISCORD_URL) end
+    pcall(function()
+        NotificationSystem:ShowGeneralNotification("Discord copied!", NOTIFY_GREEN)
+    end)
+    pcall(function() SoundManager:Play("SUCCESS") end)
+end)
+
+refill.MouseButton1Click:Connect(function()
+    setFakeRobux(cfg.startRobux)
+end)
+
+if cfg.autoOn then on = true paint() end
+
+local function destroySelf()
+    on = false
+    paint()
+    setContentCreator(false)
+    if ccCharConn then pcall(function() ccCharConn:Disconnect() end) end
+    if ccMaintainer then ccMaintainer = nil end
+    clearOverheadTag()
+    pcall(function() gui:Destroy() end)
+    _G.__SV_SPEED_GIFTER = nil
+    _G.SVSpeedGifter = nil
+end
+
+_G.__SV_SPEED_GIFTER = { Destroy = destroySelf }
+
+_G.SVSpeedGifter = setmetatable({
+    Enable = function() on = true paint() end,
+    Disable = function() on = false paint() end,
+    Refill = function() setFakeRobux(cfg.startRobux) end,
+    SetRobux = setFakeRobux,
+    SetContentCreator = setContentCreator,
+    GetGiftType = getGiftType,
+    ResolveGift = resolveGiftByType,
+    Destroy = destroySelf,
+}, {
+    __metatable = "ScriptVerse",
+    __newindex = function()
+        error("ScriptVerse protected API", 0)
+    end,
+})
