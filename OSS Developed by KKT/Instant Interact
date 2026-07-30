@@ -1,0 +1,16 @@
+-- Instant Interact Ultimate
+local ProximityPromptService = game:GetService("ProximityPromptService")
+
+local function instantAll(prompt)
+    if prompt:IsA("ProximityPrompt") then
+        prompt.HoldDuration = 0
+        prompt.MaxActivationDistance = 10  -- Distance
+        prompt.RequiresLineOfSight = false       -- Gaze
+    elseif prompt:IsA("ClickDetector") then
+        prompt.MaxActivationDistance = 10
+    end
+end
+for _, obj in ipairs(workspace:GetDescendants()) do
+    instantAll(obj)
+end
+workspace.DescendantAdded:Connect(instantAll)
