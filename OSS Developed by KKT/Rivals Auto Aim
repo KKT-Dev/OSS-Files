@@ -1,0 +1,173 @@
+--KKT Rivals Auto Aim v2 OSS
+local plrs = game:GetService("Players")
+local rs = game:GetService("RunService")
+local uis = game:GetService("UserInputService")
+local lp = plrs.LocalPlayer
+local cam = workspace.CurrentCamera
+
+-- config
+getgenv().Aimbot = true          -- ON / OFF
+getgenv().Smoothness = 2
+getgenv().FOV = 400
+getgenv().MaxDistance = 350      -- 距離制限（スタッド）
+getgenv().WallCheck = true       -- 壁チェック
+
+getgenv().Friends = {
+    -- "Friend_1",
+    -- "Firend_2",
+}
+
+local circle = Drawing.new("Circle")
+circle.Thickness = 2
+circle.Visible = true
+circle.Color = Color3.fromRGB(255, 50, 50)
+circle.Transparency = 0.5
+
+local function toggleAimbot()
+    getgenv().Aimbot = not getgenv().Aimbot
+end
+
+local function toggleWallCheck()
+    getgenv().WallCheck = not getgenv().WallCheck
+end
+
+uis.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.Q then
+        toggleAimbot()
+    elseif input.KeyCode == Enum.KeyCode.V then
+        toggleWallCheck()
+    end
+end)
+
+local function isVisible(startPos, targetPart)
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.FilterDescendantsInstances = {lp.Character, targetPart.Parent}
+    raycastParams.IgnoreWater = true
+    local targetPos = targetPart.Position
+    local size = targetPart.Size
+    local checkPoints = {
+        targetPos,
+        targetPos + Vector3.new(size.X/2, 0, 0),
+        targetPos + Vector3.new(-size.X/2, 0, 0),
+        targetPos + Vector3.new(0, size.Y/2, 0),
+        targetPos + Vector3.new(0, -size.Y/2, 0),
+        targetPos + Vector3.new(0, 0, size.Z/2),
+        targetPos + Vector3.new(0, 0, -size.Z/2),
+        targetPos + Vector3.new(size.X/3, size.Y/3, 0),
+        targetPos + Vector3.new(-size.X/3, size.Y/3, 0),
+        targetPos + Vector3.new(size.X/3, -size.Y/3, 0),
+        targetPos + Vector3.new(-size.X/3, -size.Y/3, 0),
+    }
+    local visibleCount = 0
+    local totalChecks = #checkPoints
+    for _, point in ipairs(checkPoints) do
+        local direction = (point - startPos).Unit
+        local distance = (point - startPos).Magnitude
+        if distance < 0.5 then
+            visibleCount = visibleCount + 1
+        else
+            local raycastResult = workspace:Raycast(startPos, direction * distance, raycastParams)
+            
+            if not raycastResult then
+                visibleCount = visibleCount + 1
+            else
+                local hitPart = raycastResult.Instance
+                local targetChar = targetPart.Parent
+                if hitPart and targetChar and hitPart:IsDescendantOf(targetChar) then
+                    visibleCount = visibleCount + 1
+                end
+            end
+        end
+    end
+    return (visibleCount / totalChecks) >= 0.7
+end
+local function isFullyVisible(cameraPos, character)
+    local head = character:FindFirstChild("HeadHB") or character:FindFirstChild("Head")
+    local torso = character:FindFirstChild("UpperTorso") or character:FindFirstChild("HumanoidRootPart")
+    if not head and not torso then
+        return false
+    end
+    local headVisible = false
+    local torsoVisible = false
+    if head then
+        headVisible = isVisible(cameraPos, head)
+    end
+    if torso then
+        torsoVisible = isVisible(cameraPos, torso)
+    end
+    if headVisible then
+        return true
+    elseif torsoVisible then
+        return true
+    end
+    
+    return false
+end
+local function isFriend(player)
+    for _, friendName in pairs(getgenv().Friends) do
+        if player.Name == friendName or player.DisplayName == friendName then
+            return true
+        end
+    end
+    return false
+end
+
+local function get_target()
+    local target = nil
+    local dist = getgenv().FOV
+    local mouse = uis:GetMouseLocation()
+    local character = lp.Character
+    if not character then return nil end
+    local rootPart = character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head")
+    if not rootPart then return nil end
+    local cameraPos = cam.CFrame.Position
+
+    for _, v in pairs(plrs:GetPlayers()) do
+        if v ~= lp and v.Character and v.Character:FindFirstChild("Humanoid") and v.Character.Humanoid.Health > 0 then
+            if isFriend(v) then
+                continue
+            end
+            local targetChar = v.Character
+            if getgenv().WallCheck then
+                if not isFullyVisible(cameraPos, targetChar) then
+                    continue
+                end
+            end
+            local part = targetChar:FindFirstChild("HeadHB") or targetChar:FindFirstChild("Head") or targetChar:FindFirstChild("UpperTorso") or targetChar:FindFirstChild("HumanoidRootPart")
+            if part then
+                local distance = (part.Position - rootPart.Position).Magnitude
+                if distance > getgenv().MaxDistance then
+                    continue
+                end
+                local pos, on_screen = cam:WorldToViewportPoint(part.Position)
+                if on_screen then
+                    local mag = (Vector2.new(pos.X, pos.Y) - mouse).Magnitude
+                    if mag < dist then
+                        dist = mag
+                        target = part
+                    end
+                end
+            end
+        end
+    end
+    return target
+end
+rs.RenderStepped:Connect(function()
+    circle.Visible = getgenv().Aimbot
+    circle.Radius = getgenv().FOV
+    circle.Position = uis:GetMouseLocation()
+    if uis:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) and getgenv().Aimbot then
+        local target = get_target()
+        if target then
+            local pos, _ = cam:WorldToViewportPoint(target.Position)
+            local mouse_loc = uis:GetMouseLocation()
+            local x = (pos.X - mouse_loc.X) * getgenv().Smoothness
+            local y = (pos.Y - mouse_loc.Y) * getgenv().Smoothness
+            if mousemoverel then
+                mousemoverel(x, y)
+            end
+        end
+    end
+end)
