@@ -1,0 +1,38 @@
+-- Blade Ball Crash Click v2
+
+local VIM = game:GetService("VirtualInputManager")
+local UIS = game:GetService("UserInputService")
+local RS  = game:GetService("RunService")
+
+local enabled    = false
+local connection: RBXScriptConnection?
+
+local function pressF()
+    VIM:SendKeyEvent(true,  Enum.KeyCode.F, false, game)
+    VIM:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+end
+
+local function startSpam()
+    if connection then return end
+    connection = RS.Heartbeat:Connect(pressF)
+end
+
+local function stopSpam()
+    if connection then
+        connection:Disconnect()
+        connection = nil
+    end
+end
+
+UIS.InputBegan:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.Three then
+        enabled = not enabled
+        if enabled then
+            startSpam()
+            print("[F Spam] ON")
+        else
+            stopSpam()
+            print("[F Spam] OFF")
+        end
+    end
+end)
